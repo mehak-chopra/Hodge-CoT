@@ -4,3 +4,4 @@ pandas
 networkx
 matplotlib
 scikit-learn
+python-dotenv
