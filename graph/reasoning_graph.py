@@ -1,59 +1,97 @@
-import networkx as nx
+import textwrap
+
 import matplotlib.pyplot as plt
+import networkx as nx
 
 
 class ReasoningGraph:
     """
-    Represents a language model reasoning trace as a directed graph.
+    Represents a structured reasoning trace as a directed graph.
 
     Each reasoning step is represented as a node.
     Relationships between reasoning steps are represented as
-    directed, weighted edges.
+    directed edges.
+
+    This class is responsible for graph construction and
+    structural validation.
+
+    It does NOT perform:
+        - Hodge decomposition
+        - inconsistency detection
+        - reasoning repair
+        - evaluation
     """
 
-    def __init__(self, question, final_answer, ground_truth=None):
+    def __init__(
+        self,
+        question,
+        final_answer,
+        ground_truth=None
+    ):
         """
         Initialize a reasoning graph.
 
         Parameters
         ----------
         question : str
-            The original reasoning question.
+            Original reasoning question.
 
         final_answer : str
-            The answer produced by the model.
+            Answer produced by the reasoning trace.
 
         ground_truth : str, optional
-            The correct answer from the dataset, if available.
+            Correct answer, when available.
         """
 
         self.question = question
         self.final_answer = final_answer
         self.ground_truth = ground_truth
 
-        # NetworkX directed graph
+        # Directed graph used as the reasoning representation.
         self.graph = nx.DiGraph()
 
-    def add_reasoning_step(self, step_id, text, step_type="inference"):
+        # Store graph-level metadata.
+        self.graph.graph["question"] = question
+        self.graph.graph["final_answer"] = final_answer
+        self.graph.graph["ground_truth"] = ground_truth
+
+    def add_reasoning_step(
+        self,
+        step_id,
+        text,
+        step_type="unknown"
+    ):
         """
-        Add a reasoning step as a node.
+        Add one reasoning step as a graph node.
 
         Parameters
         ----------
         step_id : int
-            Unique identifier for the reasoning step.
+            Unique reasoning-step identifier.
 
         text : str
-            The actual reasoning statement.
+            Reasoning statement.
 
         step_type : str
-            Type of reasoning step, such as:
-            premise, operation, inference, conclusion.
+            Semantic type of the step.
+
+            The default is "unknown" because the reasoning
+            extractor does not determine semantic step types.
         """
+
+        if step_id in self.graph.nodes:
+            raise ValueError(
+                f"Reasoning step {step_id} already exists."
+            )
+
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(
+                f"Reasoning step {step_id} must contain text."
+            )
 
         self.graph.add_node(
             step_id,
-            text=text,
+            text=text.strip(),
             step_type=step_type
         )
 
@@ -61,7 +99,7 @@ class ReasoningGraph:
         self,
         source,
         target,
-        relation="supports",
+        relation="follows",
         weight=1.0
     ):
         """
@@ -70,69 +108,243 @@ class ReasoningGraph:
         Parameters
         ----------
         source : int
-            ID of the source reasoning step.
+            Source reasoning-step ID.
 
         target : int
-            ID of the target reasoning step.
+            Target reasoning-step ID.
 
         relation : str
-            Type of relationship, for example:
-            supports, contradicts, depends_on, implies.
+            Type of relationship.
 
         weight : float
-            Numerical strength of the relationship.
+            Structural edge weight.
+
+            The default value of 1.0 is a placeholder for the
+            initial graph representation. It is NOT yet the
+            mathematically defined Hodge edge flow.
         """
+
+        if source not in self.graph.nodes:
+            raise ValueError(
+                f"Source reasoning step {source} does not exist."
+            )
+
+        if target not in self.graph.nodes:
+            raise ValueError(
+                f"Target reasoning step {target} does not exist."
+            )
+
+        if not isinstance(weight, (int, float)):
+            raise TypeError(
+                "Relationship weight must be numeric."
+            )
 
         self.graph.add_edge(
             source,
             target,
             relation=relation,
-            weight=weight
+            weight=float(weight)
         )
+
+    def add_extracted_steps(self, reasoning_steps):
+        """
+        Add reasoning steps produced by ReasoningExtractor.
+
+        Parameters
+        ----------
+        reasoning_steps : list[dict]
+            Structured reasoning steps in the format:
+
+            [
+                {
+                    "step_id": 1,
+                    "text": "..."
+                },
+                ...
+            ]
+
+        Notes
+        -----
+        Step types are initially set to "unknown".
+
+        Semantic classification belongs to the graph
+        reasoning layer and can be added later.
+        """
+
+        if not reasoning_steps:
+            raise ValueError(
+                "No reasoning steps were provided."
+            )
+
+        for step in reasoning_steps:
+
+            if "step_id" not in step:
+                raise KeyError(
+                    "Reasoning step is missing 'step_id'."
+                )
+
+            if "text" not in step:
+                raise KeyError(
+                    "Reasoning step is missing 'text'."
+                )
+
+            self.add_reasoning_step(
+                step_id=step["step_id"],
+                text=step["text"],
+                step_type=step.get(
+                    "step_type",
+                    "unknown"
+                )
+            )
+
+    def connect_sequential_steps(self):
+        """
+        Connect consecutive reasoning steps.
+
+        For example:
+
+            S1 → S2 → S3 → S4
+
+        The initial relationship is "follows".
+
+        The default weight of 1.0 is a structural placeholder,
+        not a final Hodge flow value.
+        """
+
+        step_ids = list(self.graph.nodes)
+
+        step_ids.sort()
+
+        for source, target in zip(
+            step_ids,
+            step_ids[1:]
+        ):
+            self.add_relationship(
+                source=source,
+                target=target,
+                relation="follows",
+                weight=1.0
+            )
+
+    def build_from_extracted_result(self, extracted_result):
+        """
+        Build the graph from ReasoningExtractor output.
+
+        Parameters
+        ----------
+        extracted_result : dict
+            Output produced by ReasoningExtractor.extract()
+            or ReasoningExtractor.extract_example().
+
+        Returns
+        -------
+        ReasoningGraph
+            The current graph object.
+        """
+
+        if "reasoning_steps" not in extracted_result:
+            raise KeyError(
+                "Extracted result is missing 'reasoning_steps'."
+            )
+
+        self.add_extracted_steps(
+            extracted_result["reasoning_steps"]
+        )
+
+        # Connect steps according to their original order.
+        self.connect_sequential_steps()
+
+        return self
 
     def validate_graph(self):
         """
-        Validate the reasoning graph structure.
+        Validate the structural integrity of the reasoning graph.
 
         Returns
         -------
         bool
-            True if the graph is valid, otherwise False.
+            True if the graph is valid.
         """
 
         if self.graph.number_of_nodes() == 0:
-            print("Validation failed: graph contains no reasoning steps.")
+            print(
+                "Validation failed: "
+                "graph contains no reasoning steps."
+            )
             return False
 
-        # Check that every edge connects existing nodes.
-        for source, target in self.graph.edges():
+        # Validate node attributes.
+        for node, data in self.graph.nodes(data=True):
+
+            if "text" not in data:
+                print(
+                    f"Validation failed: "
+                    f"node {node} has no text."
+                )
+                return False
+
+            if not data["text"].strip():
+                print(
+                    f"Validation failed: "
+                    f"node {node} has empty text."
+                )
+                return False
+
+            if "step_type" not in data:
+                print(
+                    f"Validation failed: "
+                    f"node {node} has no step type."
+                )
+                return False
+
+        # Validate edge attributes.
+        for source, target, data in self.graph.edges(
+            data=True
+        ):
 
             if source not in self.graph.nodes:
-                print(f"Validation failed: source node {source} does not exist.")
+                print(
+                    f"Validation failed: "
+                    f"source node {source} does not exist."
+                )
                 return False
 
             if target not in self.graph.nodes:
-                print(f"Validation failed: target node {target} does not exist.")
+                print(
+                    f"Validation failed: "
+                    f"target node {target} does not exist."
+                )
                 return False
-
-        # Check that every edge has required attributes.
-        for source, target, data in self.graph.edges(data=True):
 
             if "relation" not in data:
                 print(
-                    f"Validation failed: edge {source}->{target} "
+                    f"Validation failed: "
+                    f"edge {source}->{target} "
                     "has no relation."
                 )
                 return False
 
             if "weight" not in data:
                 print(
-                    f"Validation failed: edge {source}->{target} "
+                    f"Validation failed: "
+                    f"edge {source}->{target} "
                     "has no weight."
                 )
                 return False
 
+            if not isinstance(
+                data["weight"],
+                (int, float)
+            ):
+                print(
+                    f"Validation failed: "
+                    f"edge {source}->{target} "
+                    "has non-numeric weight."
+                )
+                return False
+
         print("Graph validation successful.")
+
         return True
 
     def get_graph(self):
@@ -142,61 +354,100 @@ class ReasoningGraph:
 
         return self.graph
 
+    def get_reasoning_steps(self):
+        """
+        Return reasoning steps in graph order.
+
+        Returns
+        -------
+        list[dict]
+            Structured reasoning steps.
+        """
+
+        steps = []
+
+        for node, data in self.graph.nodes(
+            data=True
+        ):
+            steps.append(
+                {
+                    "step_id": node,
+                    "text": data["text"],
+                    "step_type": data["step_type"]
+                }
+            )
+
+        return steps
+
     def display(self):
         """
-        Display the reasoning graph visually.
+        Display the reasoning graph.
+
+        The visualization is intended for inspection and
+        debugging of the graph representation.
         """
 
         if self.graph.number_of_nodes() == 0:
-            print("Cannot display an empty reasoning graph.")
+            print(
+                "Cannot display an empty reasoning graph."
+            )
             return
 
-        # Create a reproducible layout.
-        positions = nx.spring_layout(
-            self.graph,
-            seed=42
+        plt.figure(
+            figsize=(14, 8)
         )
 
-        # Create node labels.
+        # Use a deterministic layout.
+        positions = nx.spring_layout(
+            self.graph,
+            seed=42,
+            k=2.0
+        )
+
+        # Wrap long reasoning text so labels remain readable.
         node_labels = {}
 
-        for node, data in self.graph.nodes(data=True):
+        for node, data in self.graph.nodes(
+            data=True
+        ):
 
-            step_type = data.get("step_type", "unknown")
-            text = data.get("text", "")
+            wrapped_text = textwrap.fill(
+                data["text"],
+                width=35
+            )
 
             node_labels[node] = (
                 f"S{node}\n"
-                f"[{step_type}]\n"
-                f"{text}"
+                f"[{data['step_type']}]\n"
+                f"{wrapped_text}"
             )
 
-        # Draw nodes and directed edges.
+        # Draw graph.
         nx.draw(
             self.graph,
             positions,
-            with_labels=True,
             labels=node_labels,
-            node_size=6000,
+            with_labels=True,
+            node_size=7000,
             font_size=8,
             arrows=True,
             arrowsize=20
         )
 
-        # Create edge labels.
+        # Edge labels.
         edge_labels = {}
 
-        for source, target, data in self.graph.edges(data=True):
+        for source, target, data in self.graph.edges(
+            data=True
+        ):
 
-            relation = data.get("relation", "unknown")
-            weight = data.get("weight", 1.0)
-
-            edge_labels[(source, target)] = (
-                f"{relation}\n"
-                f"weight={weight:.2f}"
+            edge_labels[
+                (source, target)
+            ] = (
+                f"{data['relation']}\n"
+                f"weight={data['weight']:.2f}"
             )
 
-        # Draw relationship labels.
         nx.draw_networkx_edge_labels(
             self.graph,
             positions,
@@ -204,107 +455,102 @@ class ReasoningGraph:
             font_size=7
         )
 
-        # Display graph information.
         plt.title(
             "Hodge-CoT Reasoning Graph",
-            fontsize=12
+            fontsize=13
         )
 
         plt.axis("off")
-        plt.tight_layout()
+
         plt.show()
 
 
-def create_reasoning_graph():
+def create_graph_from_extracted_result(
+    extracted_result,
+    ground_truth=None
+):
     """
-    Create a sample reasoning graph.
+    Convenience function for constructing a ReasoningGraph
+    directly from ReasoningExtractor output.
 
-    This manually constructed example is used to test the
-    graph representation before connecting it to a dataset
-    and language model.
+    Parameters
+    ----------
+    extracted_result : dict
+        Structured reasoning result.
+
+    ground_truth : str, optional
+        Correct answer.
+
+    Returns
+    -------
+    ReasoningGraph
+        Constructed reasoning graph.
     """
 
-    # ---------------------------------------------------------
-    # 1. Problem information
-    # ---------------------------------------------------------
-
-    question = (
-        "Alice has 10 apples and gives 3 apples to Bob. "
-        "How many apples does Alice have remaining?"
-    )
-
-    final_answer = "7"
-    ground_truth = "7"
-
-    # Create the reasoning graph object.
-    reasoning_graph = ReasoningGraph(
-        question=question,
-        final_answer=final_answer,
+    graph = ReasoningGraph(
+        question=extracted_result.get(
+            "question",
+            ""
+        ),
+        final_answer=extracted_result[
+            "final_answer"
+        ],
         ground_truth=ground_truth
     )
 
-    # ---------------------------------------------------------
-    # 2. Add reasoning steps
-    # ---------------------------------------------------------
-
-    reasoning_graph.add_reasoning_step(
-        step_id=1,
-        text="Alice initially has 10 apples.",
-        step_type="premise"
+    graph.build_from_extracted_result(
+        extracted_result
     )
 
-    reasoning_graph.add_reasoning_step(
-        step_id=2,
-        text="Alice gives 3 apples to Bob.",
-        step_type="operation"
-    )
-
-    reasoning_graph.add_reasoning_step(
-        step_id=3,
-        text="The number of apples remaining is 10 - 3.",
-        step_type="inference"
-    )
-
-    reasoning_graph.add_reasoning_step(
-        step_id=4,
-        text="Therefore, Alice has 7 apples remaining.",
-        step_type="conclusion"
-    )
-
-    # ---------------------------------------------------------
-    # 3. Add relationships between reasoning steps
-    # ---------------------------------------------------------
-
-    reasoning_graph.add_relationship(
-        source=1,
-        target=2,
-        relation="supports",
-        weight=1.0
-    )
-
-    reasoning_graph.add_relationship(
-        source=2,
-        target=3,
-        relation="supports",
-        weight=1.0
-    )
-
-    reasoning_graph.add_relationship(
-        source=3,
-        target=4,
-        relation="implies",
-        weight=1.0
-    )
-
-    return reasoning_graph
+    return graph
 
 
 if __name__ == "__main__":
 
-    # Create the sample reasoning graph.
-    reasoning_graph = create_reasoning_graph()
+    # ---------------------------------------------------------
+    # Standalone test
+    # ---------------------------------------------------------
 
-    # Print basic problem information.
+    sample_result = {
+        "question": (
+            "Alice has 10 apples and gives "
+            "3 apples to Bob. How many apples "
+            "does Alice have remaining?"
+        ),
+
+        "reasoning_steps": [
+            {
+                "step_id": 1,
+                "text": "Alice initially has 10 apples."
+            },
+            {
+                "step_id": 2,
+                "text": "Alice gives 3 apples to Bob."
+            },
+            {
+                "step_id": 3,
+                "text": (
+                    "The number of apples remaining "
+                    "is 10 - 3."
+                )
+            },
+            {
+                "step_id": 4,
+                "text": (
+                    "Therefore, Alice has "
+                    "7 apples remaining."
+                )
+            }
+        ],
+
+        "final_answer": "7"
+    }
+
+    reasoning_graph = create_graph_from_extracted_result(
+        sample_result,
+        ground_truth="7"
+    )
+
     print("\nQuestion:")
     print(reasoning_graph.question)
 
@@ -314,9 +560,28 @@ if __name__ == "__main__":
     print("\nGround Truth:")
     print(reasoning_graph.ground_truth)
 
-    # Validate the graph.
+    print("\nReasoning Steps:")
+
+    for step in reasoning_graph.get_reasoning_steps():
+        print(
+            f"S{step['step_id']} "
+            f"[{step['step_type']}]: "
+            f"{step['text']}"
+        )
+
     print("\nValidating graph...")
+
     reasoning_graph.validate_graph()
 
-    # Display the graph.
+    print("\nEdges:")
+
+    for source, target, data in (
+        reasoning_graph.graph.edges(data=True)
+    ):
+        print(
+            f"S{source} -> S{target} | "
+            f"relation={data['relation']} | "
+            f"weight={data['weight']}"
+        )
+
     reasoning_graph.display()
